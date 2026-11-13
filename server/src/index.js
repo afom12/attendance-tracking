@@ -1,9 +1,10 @@
 import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { initDb, q } from './db.js';
 import { api, iclock, hik } from './routes.js';
 import { processRange } from './engine.js';
+import { runAlerts } from './alerts.js';
+import { initDb, getSettings } from './db.js';
 import { today, addDays } from './util.js';
 
 const app = express();
@@ -29,6 +30,7 @@ let busy = false;
 const tick = async () => {
   if (busy) return; busy = true;
   try { await processRange(addDays(today(), -1), today()); } catch (e) { console.error('processing failed', e); }
+  try { await runAlerts(await getSettings()); } catch (e) { console.error('reminders failed', e); }
   busy = false;
 };
 if (process.env.NO_SCHEDULER !== '1') { tick(); setInterval(tick, 10 * 60000); }

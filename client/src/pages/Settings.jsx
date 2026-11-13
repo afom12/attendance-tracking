@@ -9,6 +9,11 @@ const RULES = [
   ['overtime_min', 'Minimum minutes after end of day that count as overtime'],
   ['dedupe_min', 'Ignore repeat punches within this many minutes'],
   ['correction_window_days', 'Working days an employee has to request a correction'],
+  ['probation_months', 'Months a new employee is on probation'],
+  ['probation_alert_days', 'Remind HR this many days before a probation ends'],
+  ['absence_alert_days', 'Alert HR and the supervisor after this many working days absent in a row (0 = never)'],
+  ['approval_reminder_days', 'Chase a request that has waited this many days for a decision (0 = never)'],
+  ['carry_over_max_days', 'Unused annual leave days that move into the next year (0 = none)'],
 ];
 
 function Rules() {
@@ -23,6 +28,8 @@ function Rules() {
     <form onSubmit={save} className="form narrow">
       {RULES.map(([k, label]) => <Field key={k} label={label}><input type="number" min="0" value={f[k]} onChange={e => { setSaved(false); setF({ ...f, [k]: e.target.value }); }} required /></Field>)}
       <label className="check"><input type="checkbox" checked={f.annual_extra_day_every_2_years === 'true'} onChange={e => { setSaved(false); setF({ ...f, annual_extra_day_every_2_years: String(e.target.checked) }); }} /> Add 1 annual leave day for every 2 further years of service</label>
+      <label className="check"><input type="checkbox" checked={f.annual_leave_during_probation === 'true'} onChange={e => { setSaved(false); setF({ ...f, annual_leave_during_probation: String(e.target.checked) }); }} /> People on probation may ask for annual leave</label>
+      <label className="check"><input type="checkbox" checked={f.annual_prorate_first_year === 'true'} onChange={e => { setSaved(false); setF({ ...f, annual_prorate_first_year: String(e.target.checked) }); }} /> In the year someone starts, give annual leave only for the months worked</label>
       <ErrorNote>{act.error}</ErrorNote>
       <div className="row-end">{saved && <span className="ok">Saved</span>}<button className="primary" disabled={act.busy}>Save</button></div>
     </form>

@@ -31,7 +31,7 @@ export const auth = wrap(async (req, res, next) => {
   const token = (req.headers.authorization || '').replace(/^Bearer /, '') || req.query.token;
   let id;
   try { id = jwt.verify(token, SECRET).id; } catch { fail(401, 'Please log in'); }
-  const u = await q1('SELECT id, employee_no, full_name, role, department_id, shift_id, active, must_change_password FROM employees WHERE id=$1', [id]);
+  const u = await q1('SELECT id, employee_no, full_name, role, department_id, shift_id, active, must_change_password, track_attendance FROM employees WHERE id=$1', [id]);
   if (!u || !u.active) fail(401, 'Account is not active');
   // FR-02: with a temporary password, the only thing a user may do is choose their own.
   if (u.must_change_password && !['/me', '/auth/change-password'].includes(req.path))
@@ -60,5 +60,15 @@ export const audit = (user, action, entity, entityId, oldValue = null, newValue 
   q('INSERT INTO audit_log (user_id, action, entity, entity_id, old_value, new_value) VALUES ($1,$2,$3,$4,$5,$6)',
     [user?.id ?? null, action, entity, entityId == null ? null : String(entityId),
      oldValue && JSON.stringify(oldValue), newValue && JSON.stringify(newValue)]);
-export const notify = (employeeId, title, body = '') =>
-  q('INSERT INTO notifications (employee_id, title, body) VALUES ($1,$2,$3)', [employeeId, title, body]);
+// A key makes the notification one-off: the same key sent to the same person again does nothing.
+// A link is the screen the notification opens.
+export const notify = (employeeId, title, body = '', { key = null, link = null } = {}) =>
+  q(`INSERT INTO notifications (employee_id, title, body, key, link) VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (employee_id, key) WHERE key IS NOT NULL DO NOTHING`, [employeeId, title, body, key, link]);
+// Calendar months, clamped to the month end: 31 Dec + 2 months = 28 (or 29) Feb.
+export const addMonths = (date, n) => {
+  const [y, m, d] = date.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m - 1 + n + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m - 1 + n, Math.min(d, last))).toISOString().slice(0, 10);
+};
+export const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 864e5);

@@ -65,3 +65,23 @@ CREATE TABLE IF NOT EXISTS audit_log (
   id bigserial PRIMARY KEY, user_id int, action text NOT NULL, entity text NOT NULL, entity_id text,
   old_value jsonb, new_value jsonb, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
+
+-- Employment lifecycle: probation, confirmation, leaving and coming back. Records are never deleted.
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS employment_status text NOT NULL DEFAULT 'permanent'; -- probation | permanent | not_confirmed
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS probation_end date;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS confirmed_on date;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS left_on date;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS left_reason text;
+CREATE TABLE IF NOT EXISTS employment_events (
+  id serial PRIMARY KEY, employee_id int NOT NULL REFERENCES employees ON DELETE CASCADE,
+  event text NOT NULL, effective_date date NOT NULL, note text, by_id int REFERENCES employees,
+  created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS employment_events_emp ON employment_events (employee_id, created_at);
+-- A notification with a key is sent once only (automatic reminders); link opens the related screen.
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS key text;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS link text;
+CREATE UNIQUE INDEX IF NOT EXISTS notifications_key ON notifications (employee_id, key) WHERE key IS NOT NULL;
+
+-- Accounts that are not people at work (the built-in administrator, an owner who does not punch):
+-- no absences, no leave balance, not counted in headcount or reports.
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS track_attendance boolean NOT NULL DEFAULT true;

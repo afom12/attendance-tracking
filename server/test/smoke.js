@@ -105,17 +105,33 @@ check('part-time (3 of 6 days) annual leave pro-rated to 8', r.list.find(x => x.
 const abelTk = await loginOwn('E001', abel.temp_password);
 const supTk = await loginOwn('E003', sup.temp_password);
 let nm = addDays(today, 7); while (wd(nm) !== 1) nm = addDays(nm, 1);       // a Monday next week or later
+if (nm.slice(0, 4) !== addDays(nm, 6).slice(0, 4)) nm = addDays(nm, 14);    // keep the test week inside one year
 r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: nm, end_date: addDays(nm, 6), reason: 'Family' }, abelTk);
-check('Mon-Sun leave counts 6 working days', r.days === 6, r);
+check('annual leave is closed during probation', r.status === 400 && /probation/.test(r.error), r);
+r = await call('PUT', '/api/settings', { annual_leave_during_probation: 'maybe' });
+check('a yes/no rule refuses other values', r.status === 400, r);
+r = await call('PUT', '/api/settings', { annual_leave_during_probation: 'true' });
+check('HR can open annual leave to people on probation', r.annual_leave_during_probation === 'true', r);
+r = await call('GET', '/api/approvers', null, abelTk);
+check('employee is told their supervisor decides', r.via === 'supervisor' && r.names.join() === 'Hana Supervisor', r);
+r = await call('GET', '/api/approvers', null, supTk);
+check('a supervisor cannot be their own approver: HR decides', r.via === 'hr' && r.names.join() === 'System Administrator', r);
+r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: nm, end_date: addDays(nm, 6), reason: 'Family' }, abelTk);
+check('Mon-Sun leave counts 6 working days, and says who it waits for', r.days === 6 && r.waiting_for?.join() === 'Hana Supervisor', r);
 const reqId = r.id;
 r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: addDays(nm, 2), end_date: addDays(nm, 3) }, abelTk);
 check('overlapping request refused', r.status === 400, r);
-r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: addDays(nm, 14), end_date: addDays(nm, 40) }, abelTk);
+// Paternity leave is 3 days; a full working week (the one before the request above) is more than that.
+r = await call('POST', '/api/leave/requests', { leave_type_id: setup.leave_types.find(x => x.name === 'Paternity').id, start_date: addDays(nm, -7), end_date: addDays(nm, -3) }, abelTk);
 check('request above the balance refused', r.status === 400 && /Not enough/.test(r.error), r);
 r = await call('POST', `/api/leave/requests/${reqId}/decide`, { approve: true }, abelTk);
 check('employee cannot approve own leave', r.status === 403, r);
 r = await call('GET', '/api/leave/requests?scope=pending', null, supTk);
 check('supervisor sees the pending request', r.list.length === 1, r);
+r = await call('GET', '/api/leave/requests?scope=pending', null, supTk);
+check('approver sees the balance after the request', r.list[0]?.balance?.left_after === 10 && Array.isArray(r.list[0].also_away), r.list[0]);
+r = await call('POST', `/api/leave/requests/${reqId}/decide`, { approve: false }, supTk);
+check('rejecting needs a reason', r.status === 400, r);
 r = await call('POST', `/api/leave/requests/${reqId}/decide`, { approve: true }, supTk);
 check('supervisor approves', r.ok, r);
 r = await call('GET', '/api/leave/balances', null, abelTk);
@@ -181,5 +197,161 @@ for (const path of ['/api/leave/requests', '/api/corrections', '/api/leave/calen
 }
 r = await call('GET', '/api/leave/requests', null, abelTk);
 check('employee sees own leave requests', r.list?.length === 1, r);
+
+// Leave balances in notifications and per employee
+r = await call('GET', '/api/notifications', null, abelTk);
+check('approval notification says how much leave is left', r.list.some(n => /Annual leave approved/.test(n.title) && /6 days.*10 days left/.test(n.body) && n.link === '/leave'), r.list);
+r = await call('GET', `/api/leave/requests?employee_id=${abel.id}`);
+check('HR sees one person’s leave history', r.list?.length === 1 && r.list[0].leave_type === 'Annual', r);
+r = await call('GET', `/api/leave/requests?employee_id=${sara.id}`, null, abelTk);
+check('employee cannot read another person’s leave history', r.status === 403, r);
+r = await call('GET', '/api/reports/leave');
+const lr = r.rows?.find(x => x.employee_no === 'E001');
+check('leave report: taken and left per person', lr && lr.leave[annual.id].used === 6 && lr.leave[annual.id].remaining === 10, lr);
+x = await fetch(`${B}/api/reports/leave.xlsx?token=${token}`);
+check('leave Excel downloads', x.status === 200 && (await x.arrayBuffer()).byteLength > 3000, x.status);
+
+// System account, approval chain, leave rules
+const adminId = (await call('GET', '/api/me')).id;
+r = await call('GET', '/api/attendance/today');
+check('the system administrator is not in the team list', !r.list.some(x => x.employee_id === adminId) && r.list.length > 0, r.list.map(x => x.full_name));
+r = await call('GET', `/api/reports/monthly?from=${addDays(today, -8)}&to=${today}`);
+check('the system administrator is not in reports', !r.rows.some(x => x.employee_no === 'ADMIN'), r.rows.map(x => x.employee_no));
+r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: nm, end_date: nm });
+check('a system account cannot ask for leave', r.status === 400 && /not recorded/.test(r.error), r);
+r = await call('GET', '/api/approvers');
+check('with one administrator, nobody could decide for them', r.names.length === 0 && r.via === 'none', r);
+r = await call('POST', '/api/attendance', { employee_id: adminId, date: mon, status: 'present', note: 'Me' });
+check('HR cannot change their own attendance', r.status === 403, r);
+r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: `${today.slice(0, 4)}-12-30`, end_date: `${+today.slice(0, 4) + 1}-01-03` }, abelTk);
+check('leave across two years is refused with the reason', r.status === 400 && /two requests/.test(r.error), r);
+const sick = setup.leave_types.find(x => x.name === 'Sick');
+r = await call('POST', '/api/leave/requests', { employee_id: sara.id, leave_type_id: sick.id, start_date: addDays(nm, 21), end_date: addDays(nm, 22), reason: 'Clinic' });
+check('leave recorded by HR is approved at once', r.status === 'approved' && r.days === 2, r);
+r = await call('GET', `/api/leave/balances?employee_id=${sara.id}`);
+check('recorded leave is taken from the balance', r.list.find(x => x.leave_type_id === sick.id).used === 2, r.list);
+
+// HR officers and administrators: management decides, with the other HR people
+const officer = await call('POST', '/api/employees', { employee_no: 'E020', full_name: 'Marta Officer', role: 'hr', hire_date: '2024-01-01', on_probation: false });
+const boss = await call('POST', '/api/employees', { employee_no: 'E021', full_name: 'Girma Manager', role: 'management', hire_date: '2020-01-01', on_probation: false, track_attendance: false });
+const officerTk = await loginOwn('E020', officer.temp_password), bossTk = await loginOwn('E021', boss.temp_password);
+r = await call('GET', '/api/approvers', null, officerTk);
+check('an HR officer is decided by management and the other HR people', r.via === 'senior' && r.names.join() === 'Girma Manager,System Administrator', r);
+r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: addDays(nm, 28), end_date: addDays(nm, 28) }, officerTk);
+const officerReq = r.id;
+r = await call('POST', `/api/leave/requests/${officerReq}/decide`, { approve: true }, officerTk);
+check('an HR officer cannot approve their own leave', r.status === 403, r);
+r = await call('GET', '/api/leave/requests?scope=pending', null, bossTk);
+check('management sees only what is theirs to decide', r.list.length === 1 && r.list[0].id === officerReq, r.list?.map(x => x.full_name));
+r = await call('GET', '/api/counts', null, bossTk);
+check('management has an approvals count', r.approvals === 1, r);
+r = await call('POST', '/api/corrections', { date: today, requested_in: '08:45', reason: 'Test' }, bossTk);
+check('an account that is not recorded cannot ask for a correction', r.status === 400, r);
+r = await call('POST', `/api/leave/requests/${officerReq}/decide`, { approve: true }, bossTk);
+check('management approves the HR officer leave', r.ok, r);
+r = await call('GET', '/api/me', null, bossTk);
+check('an account can be marked as not recorded', r.track_attendance === false, r);
+r = await call('GET', '/api/dashboard/me', null, abelTk);
+check('my page says where I sit and who decides', r.place?.supervisor === 'Hana Supervisor' && r.approvers?.names[0] === 'Hana Supervisor', [r.place, r.approvers]);
+
+// Team dashboard and week grid
+r = await call('GET', '/api/dashboard/team?days=30');
+check('dashboard loads with today, trend, departments', r.today && Array.isArray(r.trend) && r.trend.length > 0 && Array.isArray(r.departments) && r.watch, Object.keys(r));
+check('dashboard trend counts add up', r.trend.every(d => ['present', 'late', 'leave', 'absent'].every(k => Number.isInteger(d[k]))), r.trend[0]);
+check('dashboard arrival times in 5-minute steps', r.arrivals.length > 0 && r.arrivals.every(a => a.min % 5 === 0), r.arrivals);
+r = await call('GET', '/api/dashboard/team', null, supTk);
+check('supervisor dashboard covers only their department', r.employees <= 3 && Array.isArray(r.devices) && r.devices.length === 0, r.employees);
+r = await call('GET', '/api/dashboard/team', null, abelTk);
+check('employee cannot open the team dashboard', r.status === 403, r);
+r = await call('GET', `/api/attendance/week?start=${wed}`);
+check('week grid starts on Monday with 7 days', r.days?.length === 7 && wd(r.start) === 1 && r.people.some(p => Object.keys(p.cells).length), r.start);
+
+// Probation (2 months) and the employment lifecycle
+let list = (await call('GET', '/api/employees')).list;
+let ab = list.find(e => e.id === abel.id);
+check('new employee starts on probation, 2 months from start', ab.employment_status === 'probation' && ab.probation_end === '2024-03-01' && ab.probation_days_left < 0, ab);
+check('employee list shows annual leave left', ab.annual?.remaining === 10 && ab.leave_taken === 6, ab.annual);
+r = await call('GET', '/api/dashboard/me', null, abelTk);
+check('employee sees own probation on Home', r.employment?.employment_status === 'probation' && r.employment.probation_days_left < 0, r.employment);
+const perm = await call('POST', '/api/employees', { employee_no: 'E009', full_name: 'Moved Permanent', department_id: dept, hire_date: '2025-05-01', on_probation: false });
+list = (await call('GET', '/api/employees')).list;
+check('HR can add someone who is already permanent', list.find(e => e.id === perm.id)?.employment_status === 'permanent', list.find(e => e.id === perm.id));
+r = await call('POST', `/api/employees/${perm.id}/probation`, { decision: 'start' });
+check('a never-confirmed person can be put on probation', r.ok && r.probation_end === '2025-07-01', r);
+r = await call('POST', `/api/employees/${abel.id}/probation`, { decision: 'confirm' }, supTk);
+check('supervisor cannot decide a probation', r.status === 403, r);
+r = await call('POST', `/api/employees/${abel.id}/probation`, { decision: 'confirm', note: 'Good attendance' });
+ab = (await call('GET', '/api/employees')).list.find(e => e.id === abel.id);
+check('HR confirms probation: now permanent', r.ok && ab.employment_status === 'permanent' && ab.confirmed_on, ab);
+r = await call('GET', '/api/notifications', null, abelTk);
+check('employee is told they are permanent', r.list.some(n => /permanent/.test(n.title)), r.list.map(n => n.title));
+r = await call('POST', `/api/employees/${abel.id}/probation`, { decision: 'confirm' });
+check('cannot confirm twice', r.status === 400, r);
+const me = (await call('GET', '/api/me')).id;
+r = await call('POST', `/api/employees/${me}/status`, { active: false, reason: 'Resigned' });
+check('nobody can deactivate themselves', r.status === 403, r);
+
+const newbie = await call('POST', '/api/employees', { employee_no: 'E010', full_name: 'New Starter', fingerprint_id: '110', department_id: dept, hire_date: addDays(today, -20) });
+const hired = addDays(today, -20), share = Math.round(16 * (13 - +hired.slice(5, 7)) / 12 * 2) / 2;
+r = (await call('GET', '/api/employees')).list.find(e => e.id === newbie.id);
+check('first-year annual leave is the share for the months worked', hired.slice(0, 4) !== today.slice(0, 4) || r.annual?.entitled === share, [r.annual, share]);
+r = await call('POST', `/api/employees/${newbie.id}/probation`, { decision: 'reject' });
+check('ending a probation needs a reason', r.status === 400, r);
+r = await call('POST', `/api/employees/${newbie.id}/probation`, { decision: 'reject', note: 'Frequent late arrival' });
+list = (await call('GET', '/api/employees')).list;
+const nb = list.find(e => e.id === newbie.id);
+check('probation not confirmed: inactive, record kept', r.ok && nb && !nb.active && nb.employment_status === 'not_confirmed' && nb.left_reason === 'Probation not confirmed', nb);
+r = await call('POST', '/api/auth/login', { username: 'E010', password: newbie.temp_password });
+check('inactive person cannot log in', r.status === 401, r);
+r = await call('GET', `/api/employees/${newbie.id}/history`);
+check('history shows start and end', r.list?.map(h => h.event).join() === 'hired,left' && /late/.test(r.list[1].note), r.list);
+
+r = await call('POST', `/api/employees/${sara.id}/status`, { active: false, reason: 'Nope' });
+check('leaving needs a known reason', r.status === 400, r);
+const lastDay = addDays(last(3), -1);
+check('part-timer was absent after her later last day (before)', (await day(sara.id, last(3)))?.status === 'absent', null);
+const keptBefore = (await call('GET', `/api/attendance?employee_id=${sara.id}&from=2024-01-01&to=${lastDay}`)).list.length;
+r = await call('POST', `/api/employees/${sara.id}/status`, { active: false, date: lastDay, reason: 'Resigned', note: 'Moved city' });
+check('HR marks someone as no longer working here', r.ok, r);
+check('no absences after the last day', (await day(sara.id, last(3))) === undefined, await day(sara.id, last(3)));
+r = await call('GET', `/api/attendance?employee_id=${sara.id}&from=2024-01-01&to=${lastDay}`);
+check('attendance up to the last day is kept', r.list.length === keptBefore, [r.list.length, keptBefore]);
+r = await call('POST', `/api/employees/${sara.id}/status`, { active: true, note: 'Rehired' });
+list = (await call('GET', '/api/employees')).list;
+check('person can come back to work', r.ok && list.find(e => e.id === sara.id)?.active, r);
+r = await call('POST', `/api/employees/${newbie.id}/status`, { active: true, date: today });
+check('return date must be after the last day', r.status === 400, r);
+r = await call('POST', `/api/employees/${newbie.id}/status`, { active: true, date: addDays(today, 1) });
+check('coming back after failed probation starts a new probation', r.ok && r.probation_end, r);
+
+// Automatic reminders: probation ending, and several days absent in a row
+if (process.env.DATABASE_URL) {
+  const { runAlerts } = await import('../src/alerts.js');
+  const { getSettings, pool } = await import('../src/db.js');
+  const late = await call('POST', '/api/employees', { employee_no: 'E011', full_name: 'Overdue Probation', department_id: dept, hire_date: '2024-01-01' });
+  const gone = await call('POST', '/api/employees', { employee_no: 'E012', full_name: 'Never Came', fingerprint_id: '112', department_id: dept, hire_date: addDays(today, -20) });
+  await call('POST', '/api/attendance/reprocess', { from: addDays(today, -10), to: today });
+  r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: addDays(nm, 35), end_date: addDays(nm, 35) }, officerTk);
+  await pool.query("UPDATE leave_requests SET created_at = now() - interval '3 days' WHERE id = $1", [r.id]);
+  await runAlerts(await getSettings());
+  await runAlerts(await getSettings());
+  r = (await call('GET', '/api/notifications')).list;
+  check('a request waiting too long is chased once', r.filter(n => n.title === 'A request is still waiting for you' && n.body.startsWith('Marta Officer')).length === 1, r.map(n => n.title));
+  r = (await call('GET', '/api/notifications')).list;
+  check('HR reminded once about an overdue probation', r.filter(n => n.title === 'Probation decision needed' && n.body.startsWith('Overdue Probation')).length === 1 && r.find(n => n.body.startsWith('Overdue Probation')).link === `/employees?open=${late.id}`, r.map(n => n.title));
+  check('HR alerted about several days absent in a row', r.filter(n => n.title === 'Absent several days in a row' && n.body.startsWith('Never Came')).length === 1, r.map(n => n.title));
+  r = (await call('GET', '/api/notifications', null, supTk)).list;
+  check('supervisor gets the same alerts, linked to Team today', r.some(n => n.body.startsWith('Never Came') && n.link === '/team'), r.map(n => n.title));
+  list = (await call('GET', '/api/employees')).list;
+  check('employee list shows the absence run', list.find(e => e.id === gone.id).absent_streak >= 3, list.find(e => e.id === gone.id));
+  r = await call('GET', '/api/counts');
+  check('Employees menu counts people who need HR', r.people >= 2 && r.notifications > 0, r);
+  const one = (await call('GET', '/api/notifications')).list.find(n => !n.read_at);
+  await call('POST', '/api/notifications/read', { id: one.id });
+  r = (await call('GET', '/api/notifications')).list;
+  check('one notification can be marked as read', r.find(n => n.id === one.id).read_at && r.some(n => !n.read_at), null);
+  await pool.end();
+} else console.log('SKIP reminders (set DATABASE_URL for the test process too)');
+
 console.log(failed ? `\n${failed} FAILED` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);

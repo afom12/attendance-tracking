@@ -7,6 +7,7 @@ import '@fontsource-variable/figtree';
 import '@fontsource-variable/bricolage-grotesque';
 import '@fontsource-variable/noto-sans-ethiopic';
 import './styles.css';
+import './dashboard.css';
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode><PrefsProvider><BrowserRouter><App /></BrowserRouter></PrefsProvider></React.StrictMode>

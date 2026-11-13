@@ -19,7 +19,16 @@ export const DEFAULT_SETTINGS = {
   correction_window_days: '3',
   annual_extra_day_every_2_years: 'false',
   device_alert_min: '30',
+  probation_months: '2',      // new employees start on probation for this long
+  probation_alert_days: '14', // HR is reminded this many days before a probation ends
+  absence_alert_days: '3',    // absent this many working days in a row without leave: HR and supervisor are alerted
+  annual_leave_during_probation: 'false', // annual leave opens once the probation is confirmed
+  annual_prorate_first_year: 'true',      // someone who starts in October gets 3/12 of the year's annual leave
+  carry_over_max_days: '0',               // unused annual leave days moved into the next year (0 = none)
+  approval_reminder_days: '2',            // a request waiting this long is chased, and HR is told
 };
+// Settings that are yes/no rather than numbers.
+export const BOOLEAN_SETTINGS = ['annual_extra_day_every_2_years', 'annual_leave_during_probation', 'annual_prorate_first_year'];
 
 export async function getSettings() {
   const rows = await q('SELECT key, value FROM settings');
@@ -32,6 +41,12 @@ export async function initDb() {
   await pool.query(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS))
     await q('INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT DO NOTHING', [k, v]);
+  // Once, on upgrade: the built-in administrator is a login, not a person at work. Its empty days are removed.
+  if (!(await q1("SELECT 1 FROM settings WHERE key = 'system_account_done'"))) {
+    const sys = await q("UPDATE employees SET track_attendance = false WHERE employee_no = 'ADMIN' AND full_name = 'System Administrator' AND fingerprint_id IS NULL RETURNING id");
+    for (const a of sys) await q("DELETE FROM attendance WHERE employee_id = $1 AND check_in IS NULL AND NOT manual AND status IN ('absent', 'not_in')", [a.id]);
+    await q("INSERT INTO settings (key, value) VALUES ('system_account_done', '1') ON CONFLICT DO NOTHING");
+  }
   if (await q1('SELECT 1 FROM employees LIMIT 1')) return;
 
   // First run: the confirmed Trade Ethiopia defaults.
@@ -53,7 +68,7 @@ export async function initDb() {
   for (const t of types)
     await q('INSERT INTO leave_types (name, days_per_year, paid, requires_attachment, calendar_days, is_annual) VALUES ($1,$2,$3,$4,$5,$6)', t);
   const hash = await bcrypt.hash(process.env.ADMIN_PASSWORD || 'ChangeMe123', 10);
-  await q(`INSERT INTO employees (employee_no, full_name, role, department_id, shift_id, hire_date, password_hash)
-           VALUES ('ADMIN', 'System Administrator', 'admin', $1, $2, CURRENT_DATE, $3)`, [dept.id, shift.id, hash]);
+  await q(`INSERT INTO employees (employee_no, full_name, role, department_id, shift_id, hire_date, password_hash, track_attendance)
+           VALUES ('ADMIN', 'System Administrator', 'admin', $1, $2, CURRENT_DATE, $3, false)`, [dept.id, shift.id, hash]);
   console.log('Database initialised. Log in as ADMIN with the ADMIN_PASSWORD value.');
 }

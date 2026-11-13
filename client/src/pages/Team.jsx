@@ -1,20 +1,75 @@
 import { useState } from 'react';
-import { api, useLoad, usePrefs, Page, Chip, Modal, Avatar, Field, ErrorNote, Empty, useAction, todayISO, STATUS } from '../lib.jsx';
+import { api, useLoad, usePrefs, Page, Chip, Modal, Avatar, Field, ErrorNote, Empty, useAction, todayISO, STATUS, Stat, Tabs, Icon } from '../lib.jsx';
+
+const CELL = { present: ['check', 'good'], extra: ['plus', 'good'], late: ['clock', 'warn'], half_day: ['clock', 'warn'], absent: ['x', 'bad'],
+  leave: ['plane', 'away'], holiday: ['sun', 'away'], not_in: ['hourglass', 'wait'] };
+
+// Seven days, one row per person: patterns (always late on Mondays, absent every Friday) jump out.
+function WeekGrid() {
+  const { fmtDate, fmtTime } = usePrefs();
+  const [start, setStart] = useState(todayISO());
+  const [data] = useLoad(`/attendance/week?start=${start}`);
+  const [find, setFind] = useState('');
+  const shift = n => { const d = new Date(Date.parse((data?.start || start) + 'T00:00:00Z') + n * 7 * 864e5); setStart(d.toISOString().slice(0, 10)); };
+  const people = data?.people.filter(p => (p.full_name + (p.department || '')).toLowerCase().includes(find.toLowerCase()));
+  const short = iso => fmtDate(iso).split(' ');
+  return (<>
+    <div className="filters">
+      <button onClick={() => shift(-1)} aria-label="Previous week">‹</button>
+      <strong className="week-label">{data && `${fmtDate(data.start)} – ${fmtDate(data.end)}`}</strong>
+      <button onClick={() => shift(1)} disabled={data && data.end >= todayISO()} aria-label="Next week">›</button>
+      <input type="search" className="push" placeholder="Find a person" value={find} onChange={e => setFind(e.target.value)} aria-label="Find a person" />
+    </div>
+    {people?.length ? <div className="table-wrap"><table className="week">
+      <thead><tr><th>Person</th>{data.days.map(d => <th key={d} className={d === todayISO() ? 'today' : ''}><span>{short(d)[0]}</span><b>{short(d)[1]}</b></th>)}<th className="num">Hours</th></tr></thead>
+      <tbody>{people.map(p => {
+        const cells = data.days.map(d => p.cells[d]);
+        const hrs = cells.reduce((n, c) => n + (c?.worked_min || 0), 0) / 60;
+        const late = cells.filter(c => ['late', 'half_day'].includes(c?.status)).length, absent = cells.filter(c => c?.status === 'absent').length;
+        return <tr key={p.id}>
+          <td><div className="who-cell"><Avatar name={p.full_name} /><div><strong>{p.full_name}</strong><small>{p.department}</small></div></div></td>
+          {cells.map((c, i) => { const [ic, tone] = CELL[c?.status] || []; return <td key={i} className="cell">
+            {c ? <div className={'day ' + tone + (c.flag ? ' flag' : '')} title={`${fmtDate(data.days[i])}: ${STATUS[c.status] || c.status}${c.check_in ? `, ${fmtTime(c.check_in)}${c.check_out ? `–${fmtTime(c.check_out)}` : ''}` : ''}${c.late_min ? `, ${c.late_min} min late` : ''}`}>
+              <Icon name={ic} /><span>{c.worked_min ? (c.worked_min / 60).toFixed(1) + 'h' : STATUS[c.status]}</span></div>
+              : <div className="day off">–</div>}</td>; })}
+          <td className="num"><b>{hrs.toFixed(1)}h</b>{(late > 0 || absent > 0) && <div className="mini-tags">{late > 0 && <span className="tag warn">{late} late</span>}{absent > 0 && <span className="tag bad">{absent} absent</span>}</div>}</td>
+        </tr>; })}</tbody>
+    </table></div> : data && <Empty>Nobody to show for this week.</Empty>}
+  </>);
+}
 
 export function TeamToday() {
+  const [view, setView] = useState('Today');
+  return view === 'This week'
+    ? <Page wide title="This week" hint="Every person, every day. Hover a day for the times." actions={<Tabs tabs={['Today', 'This week']} value={view} onChange={setView} />}><WeekGrid /></Page>
+    : <DayView tabs={<Tabs tabs={['Today', 'This week']} value={view} onChange={setView} />} />;
+}
+
+function DayView({ tabs }) {
   const { t, fmtDate, fmtTime } = usePrefs();
   const [date, setDate] = useState(todayISO());
   const [rows] = useLoad(`/attendance/today?date=${date}`);
   const [only, setOnly] = useState('');
   const count = s => rows?.filter(r => r.status === s).length || 0;
   const groups = ['present', 'late', 'half_day', 'not_in', 'absent', 'leave'].filter(s => count(s));
-  const shown = rows?.filter(r => only ? r.status === only : r.status !== 'off');
+  // The tiles filter by group: 'in' covers everyone who arrived, 'late' includes half days.
+  const GROUP = { in: ['present', 'late', 'half_day', 'extra'], late: ['late', 'half_day'] };
+  const shown = rows?.filter(r => only ? (GROUP[only] || [only]).includes(r.status) : r.status !== 'off');
+  const scheduled = rows?.filter(r => r.status !== 'off').length || 0;
+  const inNow = count('present') + count('late') + count('half_day') + count('extra');
+  const pick = s => setOnly(only === s ? '' : s);
   return (
-    <Page title={date === todayISO() ? t('Team today') : fmtDate(date)} hint={date === todayISO() ? fmtDate(date) : undefined}
-      actions={<input type="date" value={date} max={todayISO()} onChange={e => e.target.value && setDate(e.target.value)} aria-label="Date" />}>
+    <Page wide title={date === todayISO() ? t('Team today') : fmtDate(date)} hint={date === todayISO() ? `${fmtDate(date)} · ${inNow} of ${scheduled} in` : undefined}
+      actions={<>{tabs}<input type="date" value={date} max={todayISO()} onChange={e => e.target.value && setDate(e.target.value)} aria-label="Date" /></>}>
+      {rows && scheduled > 0 && <div className="stats" style={{ marginTop: 0, marginBottom: '1.25rem' }}>
+        <Stat label="In" value={inNow} unit={`/ ${scheduled}`} sub={scheduled ? `${Math.round(inNow / scheduled * 100)}% attendance` : ''} icon="check" tone="green" on={only === 'in'} onClick={() => pick('in')} />
+        <Stat label="Late" value={count('late') + count('half_day')} sub="Arrived after the grace period" icon="clock" tone="gold" on={only === 'late'} onClick={() => pick('late')} />
+        <Stat label="Not in yet" value={count('not_in')} sub={count('absent') ? `${count('absent')} absent` : 'No absences'} icon="hourglass" tone={count('absent') ? 'red' : ''} on={only === 'not_in'} onClick={() => pick('not_in')} />
+        <Stat label="On leave" value={count('leave')} sub="Approved leave" icon="plane" tone="blue" on={only === 'leave'} onClick={() => pick('leave')} />
+      </div>}
       {groups.length > 0 && <div className="filters">
         <button className={only ? '' : 'on'} onClick={() => setOnly('')}>Everyone</button>
-        {groups.map(s => <button key={s} className={only === s ? 'on' : ''} onClick={() => setOnly(s)}>{count(s)} {t(STATUS[s]).toLowerCase()}</button>)}
+        {groups.map(s => <button key={s} className={only === s ? 'on' : ''} onClick={() => setOnly(s)}>{t(STATUS[s])} <span className="n">{count(s)}</span></button>)}
       </div>}
       {shown?.length ? (
         <ul className="list">
@@ -51,14 +106,19 @@ export function Approvals() {
   const [corr, reloadCorr] = useLoad('/corrections?scope=pending');
   const nothing = leave && corr && !leave.length && !corr.length;
   return (
-    <Page title={t('Approvals')}>
+    <Page title={t('Approvals')} hint="Requests that are yours to decide. Nobody decides their own.">
       {nothing && <Empty>Nothing is waiting for you.</Empty>}
       {leave?.length > 0 && <>
         <h2 style={{ marginTop: 0 }}>Leave</h2>
         <ul className="list">{leave.map(r => (
           <li key={r.id}><Avatar name={r.full_name} />
             <div className="grow"><strong>{r.full_name} asks for {r.days} {r.days === 1 ? 'day' : 'days'} of {r.leave_type.toLowerCase()} leave</strong>
-              <small>{fmtDate(r.start_date)}{r.end_date !== r.start_date && ` to ${fmtDate(r.end_date)}`}{r.reason && `. ${r.reason}`}</small></div>
+              <small>{fmtDate(r.start_date)}{r.end_date !== r.start_date && ` to ${fmtDate(r.end_date)}`}{r.reason && `. ${r.reason}`}</small>
+              <span className="tags">
+                {r.balance && <span className={'tag ' + (r.balance.left_after < 0 ? 'bad' : 'good')}>{r.balance.left_after < 0 ? 'Not enough balance' : `${r.balance.left_after} of ${r.balance.entitled} days left after this`}</span>}
+                {r.also_away?.length > 0 && <span className="tag warn" title={r.also_away.join(', ')}>Also away then: {r.also_away.slice(0, 2).join(', ')}{r.also_away.length > 2 && ` +${r.also_away.length - 2}`}</span>}
+                {r.waiting_days >= 2 && <span className="tag warn">Waiting {r.waiting_days} days</span>}
+              </span></div>
             <div className="side"><Decision path="/leave/requests" id={r.id} onDone={reloadLeave} /></div>
           </li>))}</ul>
       </>}

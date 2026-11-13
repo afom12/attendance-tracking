@@ -1,6 +1,25 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, useLoad, usePrefs, Page, Modal, Field, ErrorNote, useAction, hours, nowMin, minOf } from '../lib.jsx';
+import { api, useLoad, usePrefs, Page, Modal, Field, ErrorNote, useAction, hours, nowMin, minOf, Icon, Stat } from '../lib.jsx';
+import { NoteList } from './Notifications.jsx';
+import { approverLine } from './Mine.jsx';
+
+// A new employee sees how far through their probation they are.
+function Probation({ e }) {
+  const { fmtDate } = usePrefs();
+  if (e?.employment_status !== 'probation' || e.probation_days_left == null) return null;
+  const left = e.probation_days_left;
+  const total = e.hire_date ? Math.max(1, Math.round((Date.parse(e.probation_end) - Date.parse(e.hire_date)) / 864e5)) : 0;
+  const done = total ? Math.min(total, Math.max(0, total - left)) : 0;
+  return (
+    <div className="status-card probation-home">
+      <p className="label">Your probation</p>
+      <p className="big">{left > 0 ? `${left} ${left === 1 ? 'day' : 'days'} left` : 'Complete, waiting for HR’s decision'}</p>
+      {total > 0 && <div className="meter"><i style={{ width: `${done / total * 100}%` }} /></div>}
+      <small>Ends on {fmtDate(e.probation_end)}. Good attendance helps. HR will tell you here when you are confirmed.</small>
+    </div>
+  );
+}
 
 function PhoneCheckIn({ onClose, onDone }) {
   const [note, setNote] = useState('');
@@ -60,7 +79,7 @@ function headline(a, s, fmtTime) {
   }
 }
 
-export default function Home({ user }) {
+export default function Home({ user, onRead }) {
   const { t, fmtDate, fmtTime, fmtStamp } = usePrefs();
   const [d, reload, error] = useLoad('/dashboard/me');
   const [bal] = useLoad('/leave/balances');
@@ -71,31 +90,64 @@ export default function Home({ user }) {
   const [text, tone] = headline(d.today, d.schedule, fmtTime);
   const m = d.month, annual = bal?.[0];
   const unread = notes?.filter(n => !n.read_at) || [];
+  const hour = Math.floor(nowMin() / 60);
+  const hello = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const first = user.full_name.split(/\s+/)[0];
+  const onTime = m.worked ? Math.round((m.worked - m.late) / m.worked * 100) : null;
+  const showProbation = d.employment?.employment_status === 'probation' && d.employment.probation_days_left != null;
   return (
-    <section className="page">
-      <p className="hint">{fmtDate(d.date)}</p>
-      <h1 className={'now ' + tone}>{text}</h1>
-      {d.schedule && <DayLine schedule={d.schedule} record={d.today} />}
-
-      <p className="summary">
-        This month you worked <b>{m.worked} {m.worked === 1 ? 'day' : 'days'}</b> ({hours(m.worked_min)} hours)
-        {m.late > 0 && <>, arrived late <b>{m.late} {m.late === 1 ? 'time' : 'times'}</b></>}
-        {m.absent > 0 && <>, and were absent <b>{m.absent} {m.absent === 1 ? 'day' : 'days'}</b></>}.
-        {annual && <> You have <b>{annual.remaining} days</b> of annual leave left.</>}
-      </p>
-      <div className="home-actions">
-        <Link className="button primary" to="/leave">{t('Request leave')}</Link>
-        <Link className="button" to="/attendance">{t('My attendance')}</Link>
-        <button className="quiet" onClick={() => setCheckin(true)}>Fingerprint reader not working?</button>
+    <section className="page wide">
+      <div className="greet">
+        <div><p className="eyebrow"><Icon name="calendar" />{fmtDate(d.date)}</p><h1>{hello}, {first}</h1></div>
+        <div className="actions">
+          <button className="quiet" onClick={() => setCheckin(true)}><Icon name="phone" />Reader not working?</button>
+          <Link className="button primary" to="/leave"><Icon name="plane" />{t('Request leave')}</Link>
+        </div>
       </div>
 
-      {unread.length > 0 && <>
-        <h2 className="section">New for you</h2>
-        <ul className="list">
-          {unread.slice(0, 5).map(n => <li key={n.id}><div className="grow"><strong>{n.title}</strong><small>{n.body}</small></div></li>)}
-        </ul>
-        <div className="row-end"><button className="quiet" onClick={async () => { await api('/notifications/read', { method: 'POST' }); reloadNotes(); }}>Mark as read</button></div>
-      </>}
+      <div className="card hero">
+        <p className="label">Today</p>
+        <p className={'now ' + tone}>{text}</p>
+        {d.schedule && <DayLine schedule={d.schedule} record={d.today} />}
+        {d.today?.check_in && <div className="home-actions">
+          <Link className="button quiet" to="/attendance">See my attendance <Icon name="arrow" /></Link>
+        </div>}
+      </div>
+
+      <div className="stats">
+        <Stat label="Days worked" value={m.worked} sub="This month" icon="check" tone="green" />
+        <Stat label="Hours worked" value={hours(m.worked_min)} unit="h" sub="This month" icon="clock" tone="blue" />
+        <Stat label="On time" value={onTime == null ? '–' : onTime} unit={onTime == null ? '' : '%'} sub={m.late ? `Late ${m.late} ${m.late === 1 ? 'time' : 'times'}` : 'Never late this month'} icon="trend" tone={m.late ? 'gold' : 'green'} />
+        {annual
+          ? <Stat label="Annual leave left" value={annual.remaining} unit="days" sub={`of ${annual.entitled} this year`} icon="plane" tone="blue" />
+          : <Stat label="Absent" value={m.absent} unit="days" sub="This month" icon="alert" tone={m.absent ? 'red' : 'green'} />}
+      </div>
+
+      <div className="home-grid">
+        {showProbation && <Probation e={d.employment} />}
+        <div className="panel">
+          <header><h2><Icon name="id" />Your place</h2></header>
+          <dl className="facts-list">
+            <div><dt>Department</dt><dd>{d.place?.department || 'Not set'}{d.place?.office && ` · ${d.place.office}`}</dd></div>
+            <div><dt>Supervisor</dt><dd>{d.place?.supervisor || 'None, HR looks after you'}</dd></div>
+            <div><dt>Your requests</dt><dd>{approverLine(d.approvers)}</dd></div>
+            <div><dt>Employment</dt><dd>{d.employment?.employment_status === 'probation' ? 'On probation' : 'Permanent'}{d.employment?.hire_date && ` · since ${fmtDate(d.employment.hire_date)}`}</dd></div>
+          </dl>
+        </div>
+        <div className="panel">
+          <header><h2><Icon name="bell" />New for you</h2>
+            {unread.length > 0 && <button className="quiet" onClick={async () => { await api('/notifications/read', { method: 'POST' }); reloadNotes(); onRead?.(); }}>Mark all as read</button>}</header>
+          {unread.length > 0
+            ? <NoteList notes={unread} limit={5} onChanged={() => { reloadNotes(); onRead?.(); }} />
+            : <p className="hint">You are up to date. Approvals and reminders will appear here.</p>}
+          {unread.length > 5 && <div className="row-end"><Link className="button quiet" to="/notifications">See all {unread.length}</Link></div>}
+        </div>
+        {m.absent > 0 && <div className="panel">
+          <header><h2><Icon name="alert" />Something wrong?</h2></header>
+          <p className="hint">You have {m.absent} {m.absent === 1 ? 'day' : 'days'} marked absent this month. If you were at work, ask for a correction from My attendance.</p>
+          <div className="home-actions"><Link className="button" to="/attendance">Review my days</Link></div>
+        </div>}
+      </div>
       {checkin && <PhoneCheckIn onClose={() => setCheckin(false)} onDone={() => { setCheckin(false); reload(); }} />}
     </section>
   );

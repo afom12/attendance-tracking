@@ -39,7 +39,7 @@ export function computeRecord({ inAt, outAt, sched, holiday, leave, dayOver, s }
 
 export async function processDay(empId, date, s) {
   s = s || await getSettings();
-  const emp = await q1('SELECT id, hire_date, active FROM employees WHERE id=$1', [empId]);
+  const emp = await q1('SELECT id, hire_date, active, left_on, track_attendance FROM employees WHERE id=$1', [empId]);
   if (!emp) return null;
   const existing = await q1('SELECT * FROM attendance WHERE employee_id=$1 AND date=$2', [empId, date]);
   if (existing?.manual) return existing;           // HR edits are never overwritten
@@ -65,7 +65,9 @@ export async function processDay(empId, date, s) {
     let status;
     if (leave) status = 'leave';
     else if (holiday) status = 'holiday';
-    else if (!sched || date > nowL.date || (emp.hire_date && date < emp.hire_date) || !emp.active) status = null;
+    // Someone who has left keeps their record up to their last day; nothing is added after it.
+    else if (!sched || date > nowL.date || (emp.hire_date && date < emp.hire_date) ||
+             (!emp.active && (!emp.left_on || date > emp.left_on)) || !emp.track_attendance) status = null;
     else status = dayOver ? 'absent' : 'not_in';
     if (!status) { if (existing) await q('DELETE FROM attendance WHERE id=$1', [existing.id]); return null; }
     r = { check_in: null, check_out: null, status, late_min: 0, early_min: 0, worked_min: 0, overtime_min: 0, flag: null };
@@ -79,7 +81,7 @@ export async function processDay(empId, date, s) {
 
 export async function processRange(from, to, empIds) {
   const s = await getSettings();
-  const ids = empIds || (await q('SELECT id FROM employees WHERE active')).map(r => r.id);
+  const ids = empIds || (await q('SELECT id FROM employees WHERE active AND track_attendance')).map(r => r.id);
   const last = to > today() ? today() : to;
   for (let d = from; d <= last; d = addDays(d, 1))
     for (const id of ids) await processDay(id, d, s);
@@ -131,8 +133,18 @@ export async function getBalance(empId, type, year) {
     const own = (await q1('SELECT count(*)::int AS n FROM employee_days WHERE employee_id=$1', [empId])).n;
     const full = (await q1('SELECT count(*)::int AS n FROM shift_days WHERE shift_id=$1', [emp.shift_id])).n;
     if (own && full && own < full) entitled = Math.round(entitled * own / full * 2) / 2;
+    // Starting part-way through a year earns that share of the year (the month of starting counts).
+    if (s.annual_prorate_first_year === 'true' && emp.hire_date && +emp.hire_date.slice(0, 4) === year)
+      entitled = Math.round(entitled * (13 - +emp.hire_date.slice(5, 7)) / 12 * 2) / 2;
+    // Unused days from last year move over, up to the limit HR has set.
+    const carry = +s.carry_over_max_days;
+    if (carry > 0) {
+      const last = await q1('SELECT entitled, used FROM leave_balances WHERE employee_id=$1 AND leave_type_id=$2 AND year=$3', [empId, type.id, year - 1]);
+      if (last) entitled += Math.min(carry, Math.max(0, last.entitled - last.used));
+    }
   }
-  return q1(`INSERT INTO leave_balances (employee_id, leave_type_id, year, entitled) VALUES ($1,$2,$3,$4)
-             ON CONFLICT DO NOTHING RETURNING *`, [empId, type.id, year, entitled])
+  // Two requests can ask for the same new balance at once; the second one reads what the first wrote.
+  return (await q1(`INSERT INTO leave_balances (employee_id, leave_type_id, year, entitled) VALUES ($1,$2,$3,$4)
+                    ON CONFLICT DO NOTHING RETURNING *`, [empId, type.id, year, entitled]))
     || q1('SELECT * FROM leave_balances WHERE employee_id=$1 AND leave_type_id=$2 AND year=$3', [empId, type.id, year]);
 }

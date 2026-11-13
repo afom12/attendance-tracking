@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useLoad, usePrefs, Page, Empty, hours, todayISO, getToken } from '../lib.jsx';
+import { useLoad, usePrefs, Page, Empty, Icon, hours, todayISO, getToken } from '../lib.jsx';
 
 const monthRange = offset => {
   const [y, m] = todayISO().split('-').map(Number);
@@ -8,7 +8,43 @@ const monthRange = offset => {
   return { from: iso(first), to: offset === 0 ? todayISO() : iso(last) };
 };
 
+// Leave taken and left for every person, per leave type, for a year.
+function LeaveBalances({ onSwitch }) {
+  const [year, setYear] = useState(+todayISO().slice(0, 4));
+  const [dept, setDept] = useState('');
+  const [setup] = useLoad('/setup');
+  const qs = `year=${year}&department_id=${dept}`;
+  const [data] = useLoad(`/reports/leave?${qs}`);
+  const [annualOnly, setAnnualOnly] = useState(true);
+  const types = data?.types.filter(x => !annualOnly || x.is_annual) || [];
+  return (
+    <Page wide title="Leave balances" hint={`${year}. Days taken and days left for each person. ${annualOnly ? 'Showing annual leave; choose All leave types for the rest.' : ''}`}
+      actions={<><button onClick={onSwitch}>Attendance report</button><a className="button primary" href={`/api/reports/leave.xlsx?${qs}&token=${getToken()}`}><Icon name="download" />Download Excel</a></>}>
+      <div className="filters">
+        <button className={annualOnly ? 'on' : ''} onClick={() => setAnnualOnly(true)}>Annual leave</button>
+        <button className={!annualOnly ? 'on' : ''} onClick={() => setAnnualOnly(false)}>All leave types</button>
+        <select value={year} onChange={e => setYear(+e.target.value)} aria-label="Year">{[0, 1, 2].map(n => +todayISO().slice(0, 4) - n).map(y => <option key={y}>{y}</option>)}</select>
+        <select value={dept} onChange={e => setDept(e.target.value)} aria-label="Department"><option value="">All departments</option>{setup?.departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select>
+      </div>
+      {data?.rows.length ? (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Name</th>{types.map(x => <th key={x.id} className="num">{x.name}<small>taken · left</small></th>)}</tr></thead>
+          <tbody>{data.rows.map(r => <tr key={r.id}><td><strong>{r.full_name}</strong><small>{r.department}{r.employment_status === 'probation' && ' · on probation'}</small></td>
+            {types.map(x => { const b = r.leave[x.id]; return <td key={x.id} className="num">
+              <span className="taken">{b.used || '–'}</span> · <b className={b.remaining <= 0 ? 'none-left' : ''}>{b.remaining}</b>
+              {x.is_annual && <div className="meter mini" aria-hidden="true"><i style={{ width: `${b.entitled ? Math.min(100, b.used / b.entitled * 100) : 0}%` }} /></div>}</td>; })}</tr>)}</tbody>
+        </table></div>
+      ) : data && <Empty>No employees in this selection.</Empty>}
+    </Page>
+  );
+}
+
 export function Reports() {
+  const [which, setWhich] = useState('attendance');
+  return which === 'leave' ? <LeaveBalances onSwitch={() => setWhich('attendance')} /> : <AttendanceReport onSwitch={() => setWhich('leave')} />;
+}
+
+function AttendanceReport({ onSwitch }) {
   const { t, fmtDate } = usePrefs();
   const [period, setPeriod] = useState('this');
   const [custom, setCustom] = useState(monthRange(0));
@@ -21,7 +57,7 @@ export function Reports() {
   const open = rows?.reduce((n, r) => n + r.open_exceptions, 0) || 0;
   return (
     <Page wide title={t('Reports')} hint={`${fmtDate(from)} to ${fmtDate(to)}. The Excel file adds late minutes, half days and unpaid leave for payroll.`}
-      actions={<a className="button primary" href={`/api/reports/monthly.xlsx?${qs}&token=${getToken()}`}>Download Excel</a>}>
+      actions={<><button onClick={onSwitch}>Leave balances</button><a className="button primary" href={`/api/reports/monthly.xlsx?${qs}&token=${getToken()}`}><Icon name="download" />Download Excel</a></>}>
       <div className="filters">
         <button className={period === 'this' ? 'on' : ''} onClick={() => setPeriod('this')}>This month</button>
         <button className={period === 'last' ? 'on' : ''} onClick={() => setPeriod('last')}>Last month</button>
