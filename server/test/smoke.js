@@ -21,6 +21,18 @@ let r = await call('POST', '/api/auth/login', { username: 'admin', password: 'Ch
 check('admin logs in', r.status === 200 && r.user.must_change_password, r); token = r.token;
 r = await call('POST', '/api/auth/login', { username: 'admin', password: 'wrong' });
 check('wrong password refused', r.status === 401, r);
+r = await call('GET', '/api/setup');
+check('temporary password blocks the API until changed (FR-02)', r.status === 403, r);
+r = await call('POST', '/api/auth/change-password', { current: 'ChangeMe123', next: 'ChangeMe123' });
+check('new password must differ from the old one', r.status === 400, r);
+r = await call('POST', '/api/auth/change-password', { current: 'ChangeMe123', next: 'Admin-Test-2026' });
+check('own password chosen, API opens', r.ok && (await call('GET', '/api/setup')).status === 200, r);
+// Log in with a temporary password and choose an own one, as every new user must.
+const loginOwn = async (username, temp) => {
+  const tk = (await call('POST', '/api/auth/login', { username, password: temp })).token;
+  await call('POST', '/api/auth/change-password', { current: temp, next: temp + '-own' }, tk);
+  return tk;
+};
 
 const setup = await call('GET', '/api/setup');
 const dept = (await call('POST', '/api/departments', { name: 'Training' })).id;
@@ -90,8 +102,8 @@ check('full-time annual leave = 16 days', r.list.find(x => x.leave_type_id === a
 r = await call('GET', `/api/leave/balances?employee_id=${sara.id}`);
 check('part-time (3 of 6 days) annual leave pro-rated to 8', r.list.find(x => x.leave_type_id === annual.id).entitled === 8, r.list[0]);
 
-const abelTk = (await call('POST', '/api/auth/login', { username: 'E001', password: abel.temp_password })).token;
-const supTk = (await call('POST', '/api/auth/login', { username: 'E003', password: sup.temp_password })).token;
+const abelTk = await loginOwn('E001', abel.temp_password);
+const supTk = await loginOwn('E003', sup.temp_password);
 let nm = addDays(today, 7); while (wd(nm) !== 1) nm = addDays(nm, 1);       // a Monday next week or later
 r = await call('POST', '/api/leave/requests', { leave_type_id: annual.id, start_date: nm, end_date: addDays(nm, 6), reason: 'Family' }, abelTk);
 check('Mon-Sun leave counts 6 working days', r.days === 6, r);
@@ -144,6 +156,23 @@ r = await call('GET', '/api/audit');
 check('audit log records changes', r.list.some(e => e.action === 'manual-edit' && e.old_value) && r.list.some(e => e.action === 'approve'), r.list.length);
 r = await call('GET', '/api/dashboard/me', null, abelTk);
 check('employee dashboard loads', r.status === 200 && r.month, r);
+
+// Offices and the phone check-in area (FR-39, FR-11)
+r = await call('POST', '/api/branches', { name: 'Bole Office', latitude: '9.0100' });
+check('office with only half a location refused', r.status === 400, r);
+r = await call('POST', '/api/branches', { name: 'Bole Office', latitude: '95', longitude: '38.76' });
+check('office with an impossible location refused', r.status === 400, r);
+const office = await call('POST', '/api/branches', { name: 'Bole Office', address: 'Bole', latitude: '9.010000', longitude: '38.760000', radius_m: 100 });
+check('office saved with its location', office.id && office.latitude === 9.01 && office.radius_m === 100, office);
+await call('POST', '/api/departments', { id: dept, name: 'Training', branch_id: office.id, supervisor_id: sup.id });
+r = (await call('GET', '/api/setup')).branches.find(b => b.id === office.id);
+check('office shows its department count', r?.departments === 1, r);
+r = await call('POST', '/api/checkin', { latitude: 9.0200, longitude: 38.7600 }, abelTk);
+check('phone check-in 1 km away with no note refused', r.status === 400, r);
+r = await call('POST', '/api/checkin', { latitude: 9.0102, longitude: 38.7601 }, abelTk);
+check('phone check-in inside the office area accepted without review', r.employee_id === abel.id && r.check_in && r.flag !== 'field', r);
+r = (await call('GET', '/api/audit')).list.find(e => e.entity === 'branch' && e.action === 'create');
+check('office change is in the change history', !!r, r);
 
 for (const path of ['/api/leave/requests', '/api/corrections', '/api/leave/calendar', '/api/leave/requests?scope=all', '/api/attendance/today',
   '/api/notifications', '/api/settings', '/api/devices', '/api/setup', '/api/corrections?scope=pending', `/api/employees/${sara.id}/schedule`]) {

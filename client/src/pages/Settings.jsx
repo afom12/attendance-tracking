@@ -1,8 +1,7 @@
 import { useState } from 'react';
-import { api, useLoad, usePrefs, Page, Field, ErrorNote, Empty, useAction, todayISO } from '../lib.jsx';
+import { api, useLoad, usePrefs, Page, Drawer, Field, ErrorNote, Empty, useAction, todayISO } from '../lib.jsx';
 import { DaysEditor, toDays, fromDays } from './Employees.jsx';
 
-const TABS = ['Rules', 'Schedule', 'Departments', 'Holidays', 'Leave types', 'Devices', 'Audit log'];
 const RULES = [
   ['grace_min', 'Grace period (minutes after start before a check-in is late)'],
   ['half_day_min', 'Late by this many minutes or more counts as a half day'],
@@ -57,20 +56,76 @@ function Schedule({ setup }) {
   );
 }
 
+// One office per row; choosing it opens the details. The location decides whether a phone check-in is "in the office".
+function OfficeForm({ office, onDone }) {
+  const [f, setF] = useState({ name: '', address: '', latitude: '', longitude: '', radius_m: 100, ...office });
+  const act = useAction(), locate = useAction();
+  const [accuracy, setAccuracy] = useState(null);
+  const set = k => e => setF({ ...f, [k]: e.target.value });
+  const here = () => locate.run(async () => {
+    if (!navigator.geolocation) throw new Error('This browser cannot read the location. Type the numbers instead.');
+    const p = await new Promise((ok, no) => navigator.geolocation.getCurrentPosition(ok, () => no(new Error('The location could not be read. Allow location access, or type the numbers instead.')), { enableHighAccuracy: true, timeout: 15000 }));
+    setF(x => ({ ...x, latitude: p.coords.latitude.toFixed(6), longitude: p.coords.longitude.toFixed(6) }));
+    setAccuracy(Math.round(p.coords.accuracy));
+  });
+  const save = e => { e.preventDefault(); act.run(async () => { await api('/branches', { method: 'POST', body: f }); onDone(); }); };
+  const hasPlace = f.latitude !== '' && f.latitude != null && f.longitude !== '' && f.longitude != null;
+  return (
+    <form onSubmit={save} className="form">
+      <Field label="Office name"><input value={f.name} onChange={set('name')} required autoFocus={!office} /></Field>
+      <Field label="Address"><input value={f.address || ''} onChange={set('address')} placeholder="For example Bole, Addis Ababa" /></Field>
+      <h2 className="sub">Where the office is</h2>
+      <p className="hint">Phone check-ins inside this area are accepted at once. Outside it, the employee must say where they are and HR reviews it.</p>
+      <div className="inline"><button type="button" onClick={here} disabled={locate.busy}>{locate.busy ? 'Reading location…' : 'Use my current location'}</button>
+        {accuracy != null && <small>Accurate to about {accuracy} metres{accuracy > 100 ? '. Try again near a window or outside' : ''}.</small>}</div>
+      <ErrorNote>{locate.error}</ErrorNote>
+      <div className="two">
+        <Field label="Latitude"><input inputMode="decimal" value={f.latitude ?? ''} onChange={set('latitude')} placeholder="9.010000" /></Field>
+        <Field label="Longitude"><input inputMode="decimal" value={f.longitude ?? ''} onChange={set('longitude')} placeholder="38.760000" /></Field>
+      </div>
+      <Field label="Office area, in metres around that point"><input type="number" min="20" max="5000" value={f.radius_m} onChange={set('radius_m')} required /><small>100 metres suits most buildings.</small></Field>
+      {hasPlace && <a href={`https://www.openstreetmap.org/?mlat=${f.latitude}&mlon=${f.longitude}#map=18/${f.latitude}/${f.longitude}`} target="_blank" rel="noreferrer">Check this point on a map</a>}
+      <ErrorNote>{act.error}</ErrorNote>
+      <button className="primary" disabled={act.busy}>{office ? 'Save changes' : 'Add office'}</button>
+    </form>
+  );
+}
+
+function Offices({ setup, reload }) {
+  const [open, setOpen] = useState(undefined);       // undefined = closed, null = new, object = existing
+  const done = () => { setOpen(undefined); reload(); };
+  return (<>
+    <div className="actions" style={{ marginBottom: '1.5rem' }}><button className="primary" onClick={() => setOpen(null)}>Add an office</button></div>
+    <ul className="list">{setup.branches.map(b => (
+      <li key={b.id} className="click" onClick={() => setOpen(b)} onKeyDown={e => e.key === 'Enter' && setOpen(b)} tabIndex={0} role="button">
+        <div className="grow"><strong>{b.name}</strong><small>{[b.address, `${b.departments} ${b.departments === 1 ? 'department' : 'departments'}`].filter(Boolean).join(', ')}</small></div>
+        <div className="side">{b.latitude == null ? <span className="warn">Location not set</span> : <span className="time">{b.radius_m} m area</span>}<span className="chev" aria-hidden="true">›</span></div>
+      </li>))}</ul>
+    {open !== undefined && <Drawer title={open ? open.name : 'Add an office'} onClose={() => setOpen(undefined)}><OfficeForm office={open} onDone={done} /></Drawer>}
+  </>);
+}
+
 function Departments({ setup, reload }) {
   const [employees] = useLoad('/employees');
   const [name, setName] = useState('');
+  const [office, setOffice] = useState('');
   const act = useAction();
+  const many = setup.branches.length > 1;          // the office choice only appears once there is more than one
   const save = body => act.run(async () => { await api('/departments', { method: 'POST', body }); setName(''); reload(); });
   return (
     <div className="form">
       <p className="hint">The supervisor of a department sees its attendance and approves its leave. Without a supervisor, requests go to HR.</p>
-      <table><thead><tr><th>Department</th><th>Supervisor</th></tr></thead>
+      <table><thead><tr><th>Department</th>{many && <th>Office</th>}<th>Supervisor</th></tr></thead>
         <tbody>{setup.departments.map(d => <tr key={d.id}><td>{d.name}</td>
+          {many && <td><select value={d.branch_id || ''} onChange={e => save({ ...d, branch_id: e.target.value || null })} aria-label={`Office of ${d.name}`}>
+            <option value="">None</option>{setup.branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></td>}
           <td><select value={d.supervisor_id || ''} onChange={e => save({ ...d, supervisor_id: e.target.value || null })} aria-label={`Supervisor of ${d.name}`}>
             <option value="">None (HR approves)</option>{employees?.filter(e => e.active && e.role !== 'employee').map(e => <option key={e.id} value={e.id}>{e.full_name}</option>)}</select></td></tr>)}</tbody></table>
-      <form className="inline" onSubmit={e => { e.preventDefault(); save({ name, branch_id: setup.branches[0]?.id }); }}>
-        <input placeholder="New department name" value={name} onChange={e => setName(e.target.value)} required /><button className="primary" disabled={act.busy}>Add department</button>
+      <form className="inline" onSubmit={e => { e.preventDefault(); save({ name, branch_id: (many ? office : '') || setup.branches[0]?.id }); }}>
+        <input placeholder="New department name" value={name} onChange={e => setName(e.target.value)} required />
+        {many && <select value={office} onChange={e => setOffice(e.target.value)} aria-label="Office of the new department" required>
+          <option value="">Office…</option>{setup.branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select>}
+        <button className="primary" disabled={act.busy}>Add department</button>
       </form>
       <ErrorNote>{act.error}</ErrorNote>
     </div>
@@ -165,16 +220,36 @@ function Audit() {
   ) : rows && <Empty>No changes recorded yet.</Empty>;
 }
 
+const SECTIONS = [
+  ['Working hours', 'The normal working days and times, and recalculating past days', 'Schedule'],
+  ['Attendance rules', 'Grace period, half days, overtime and corrections', 'Rules'],
+  ['Offices', 'Office addresses and the area where phone check-ins count as in the office', 'Offices'],
+  ['Departments', 'Departments and who supervises each one', 'Departments'],
+  ['Holidays', 'Public holidays and company days off', 'Holidays'],
+  ['Leave types', 'Kinds of leave and how many days each gives', 'Leave types'],
+  ['Fingerprint readers', 'Connect a reader or bring in its records from a file', 'Devices'],
+  ['Change history', 'Who changed what, and when', 'Audit log'],
+];
+
 export default function Settings() {
   const { t } = usePrefs();
-  const [tab, setTab] = useState(TABS[0]);
+  const [tab, setTab] = useState('');
   const [setup, reload] = useLoad('/setup');
   if (!setup) return null;
-  return (
+  const current = SECTIONS.find(x => x[2] === tab);
+  if (!current) return (
     <Page title={t('Settings')}>
-      <div className="filters">{TABS.map(x => <button key={x} className={tab === x ? 'on' : ''} onClick={() => setTab(x)}>{x}</button>)}</div>
+      <ul className="list">{SECTIONS.map(([title, about, key]) => (
+        <li key={key} className="click" onClick={() => setTab(key)} onKeyDown={e => e.key === 'Enter' && setTab(key)} tabIndex={0} role="button">
+          <div className="grow"><strong>{title}</strong><small>{about}</small></div><span className="chev" aria-hidden="true">›</span>
+        </li>))}</ul>
+    </Page>
+  );
+  return (
+    <Page wide={tab === 'Audit log' || tab === 'Devices'} title={current[0]} hint={<button className="link" onClick={() => setTab('')}>‹ {t('Settings')}</button>}>
       {tab === 'Rules' && <Rules />}
       {tab === 'Schedule' && <Schedule setup={setup} />}
+      {tab === 'Offices' && <Offices setup={setup} reload={reload} />}
       {tab === 'Departments' && <Departments setup={setup} reload={reload} />}
       {tab === 'Holidays' && <Holidays setup={setup} reload={reload} />}
       {tab === 'Leave types' && <LeaveTypes setup={setup} reload={reload} />}

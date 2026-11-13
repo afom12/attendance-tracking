@@ -88,6 +88,8 @@ export function PrefsProvider({ children }) {
 }
 export const usePrefs = () => useContext(Prefs);
 export const todayISO = () => eat(Date.now()).toISOString().slice(0, 10);
+export const nowMin = () => { const d = eat(Date.now()); return d.getUTCHours() * 60 + d.getUTCMinutes(); };
+export const minOf = ts => { if (!ts) return null; const d = eat(ts); return d.getUTCHours() * 60 + d.getUTCMinutes(); };
 
 // ---------- Small shared pieces ----------
 export const STATUS = {
@@ -97,11 +99,35 @@ export const STATUS = {
 };
 export function Chip({ status }) {
   const { t } = usePrefs();
-  return <span className={'chip chip-' + status}>{t(STATUS[status] || status)}</span>;
+  return <span className={'status status-' + status}>{t(STATUS[status] || status)}</span>;
 }
-export function Page({ title, hint, actions, children }) {
+export function Avatar({ name = '' }) {
+  const parts = name.trim().split(/\s+/);
+  const hue = [...name].reduce((n, c, i) => n + c.charCodeAt(0) * (i + 3), 0) % 5;
+  return <span className={'avatar hue-' + hue} aria-hidden="true">{(parts[0]?.[0] || '') + (parts[1]?.[0] || '')}</span>;
+}
+// A panel that slides in from the right: one task at a time, the list stays visible behind it.
+export function Drawer({ title, subtitle, onClose, children }) {
+  useEffect(() => {
+    const onKey = e => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
   return (
-    <section className="page">
+    <div className="overlay side" onMouseDown={e => e.target === e.currentTarget && onClose()}>
+      <div className="drawer" role="dialog" aria-modal="true" aria-label={title}>
+        <header><div><h2>{title}</h2>{subtitle && <p className="hint">{subtitle}</p>}</div><button className="icon" onClick={onClose} aria-label="Close">✕</button></header>
+        {children}
+      </div>
+    </div>
+  );
+}
+export const Tabs = ({ tabs, value, onChange }) => (
+  <div className="tabs" role="tablist">{tabs.map(x => <button key={x} role="tab" aria-selected={value === x} className={value === x ? 'on' : ''} onClick={() => onChange(x)}>{x}</button>)}</div>
+);
+export function Page({ title, hint, actions, wide, children }) {
+  return (
+    <section className={'page' + (wide ? ' wide' : '')}>
       <header className="page-head">
         <div><h1>{title}</h1>{hint && <p className="hint">{hint}</p>}</div>
         {actions && <div className="actions">{actions}</div>}
@@ -119,7 +145,7 @@ export function Modal({ title, onClose, children }) {
   return (
     <div className="overlay" onMouseDown={e => e.target === e.currentTarget && onClose()}>
       <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
-        <header><h2>{title}</h2><button className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
+        <header><h2>{title}</h2><button className="icon" onClick={onClose} aria-label="Close">✕</button></header>
         {children}
       </div>
     </div>

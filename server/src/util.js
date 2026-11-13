@@ -33,6 +33,9 @@ export const auth = wrap(async (req, res, next) => {
   try { id = jwt.verify(token, SECRET).id; } catch { fail(401, 'Please log in'); }
   const u = await q1('SELECT id, employee_no, full_name, role, department_id, shift_id, active, must_change_password FROM employees WHERE id=$1', [id]);
   if (!u || !u.active) fail(401, 'Account is not active');
+  // FR-02: with a temporary password, the only thing a user may do is choose their own.
+  if (u.must_change_password && !['/me', '/auth/change-password'].includes(req.path))
+    fail(403, 'Choose your own password first');
   req.user = u;
   next();
 });

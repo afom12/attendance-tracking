@@ -28,6 +28,13 @@ npm run dev                   # open http://localhost:5173
 The tables are created on first start. Log in as **ADMIN** with the `ADMIN_PASSWORD` from `.env`;
 you are asked to choose a new password.
 
+## Passwords
+
+- **An employee forgot their password:** Employees > choose the person > Password > Set new password.
+  You can type the password yourself or let the system make one. It is shown on screen until you close it.
+- **The ADMIN password is lost:** stop the server and run `node --env-file=.env src/reset-admin.js` in the
+  `server` folder. ADMIN's password becomes the `ADMIN_PASSWORD` from `.env` again.
+
 ## First setup (as ADMIN)
 
 1. **Settings > Departments**: add the departments.

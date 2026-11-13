@@ -11,6 +11,11 @@ export const api = express.Router();
 export const iclock = express.Router();
 const HR = allow('hr', 'admin');
 const tempPassword = () => crypto.randomBytes(5).toString('base64url');
+const pickPassword = typed => {
+  if (!typed) return tempPassword();
+  if (String(typed).length < 6) fail(400, 'The password needs at least 6 characters');
+  return String(typed);
+};
 const EMP_COLS = `e.id, e.employee_no, e.full_name, e.email, e.phone, e.role, e.department_id, e.shift_id,
   e.hire_date, e.active, e.fingerprint_id, d.name AS department`;
 
@@ -80,6 +85,7 @@ api.get('/me', (req, res) => res.json(req.user));
 api.post('/auth/change-password', wrap(async (req, res) => {
   const { current = '', next = '' } = req.body;
   if (next.length < 8) fail(400, 'The new password needs at least 8 characters');
+  if (next === current) fail(400, 'The new password must be different from the current one');
   const u = await q1('SELECT password_hash FROM employees WHERE id=$1', [req.user.id]);
   if (!(await bcrypt.compare(current, u.password_hash))) fail(400, 'The current password is wrong');
   await q('UPDATE employees SET password_hash=$2, must_change_password=false WHERE id=$1', [req.user.id, await bcrypt.hash(next, 10)]);
@@ -113,7 +119,7 @@ async function linkPunches(empId, fingerprintId) {
 }
 api.post('/employees', HR, wrap(async (req, res) => {
   const f = employeeFields(req.body, req.user);
-  const temp = tempPassword();
+  const temp = pickPassword(req.body.password);
   const shift = f[6] || (await q1('SELECT id FROM shifts ORDER BY id LIMIT 1'))?.id;
   f[6] = shift;
   const e = await q1(`INSERT INTO employees (employee_no, full_name, email, phone, role, department_id, shift_id, hire_date, fingerprint_id, password_hash)
@@ -136,7 +142,7 @@ api.put('/employees/:id', HR, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 api.post('/employees/:id/reset-password', HR, wrap(async (req, res) => {
-  const temp = tempPassword();
+  const temp = pickPassword(req.body.password);
   const e = await q1('UPDATE employees SET password_hash=$2, must_change_password=true, failed_logins=0, locked_until=NULL WHERE id=$1 RETURNING id',
     [req.params.id, await bcrypt.hash(temp, 10)]);
   if (!e) fail(404, 'Employee not found');
@@ -172,7 +178,8 @@ api.put('/employees/:id/schedule', HR, wrap(async (req, res) => {
 
 // ---------- Company setup ----------
 api.get('/setup', wrap(async (req, res) => res.json({
-  branches: await q('SELECT * FROM branches ORDER BY name'),
+  branches: await q(`SELECT b.*, (SELECT count(*)::int FROM departments d WHERE d.branch_id = b.id) AS departments
+    FROM branches b ORDER BY b.name`),
   departments: await q('SELECT d.*, e.full_name AS supervisor FROM departments d LEFT JOIN employees e ON e.id = d.supervisor_id ORDER BY d.name'),
   shifts: await q('SELECT * FROM shifts ORDER BY id'),
   shift_days: await q('SELECT * FROM shift_days ORDER BY shift_id, weekday'),
@@ -181,11 +188,19 @@ api.get('/setup', wrap(async (req, res) => res.json({
 })));
 api.post('/branches', HR, wrap(async (req, res) => {
   const b = req.body; if (!b.name?.trim()) fail(400, 'Name is required');
-  const args = [b.name.trim(), b.address || null, b.latitude ?? null, b.longitude ?? null, b.radius_m || 100];
+  // The office location is optional, but when given it needs both numbers (decimal degrees).
+  const num = v => v === '' || v == null ? null : Number(v);
+  const lat = num(b.latitude), lng = num(b.longitude), radius = num(b.radius_m) ?? 100;
+  if ((lat == null) !== (lng == null)) fail(400, 'Give both latitude and longitude, or neither');
+  if (lat != null && !(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) fail(400, 'The location is not valid');
+  if (!(radius >= 20 && radius <= 5000)) fail(400, 'The office area must be between 20 and 5000 metres');
+  const args = [b.name.trim(), b.address?.trim() || null, lat, lng, Math.round(radius)];
+  const old = b.id ? await q1('SELECT * FROM branches WHERE id=$1', [b.id]) : null;
+  if (b.id && !old) fail(404, 'Office not found');
   const r = b.id
-    ? await q1('UPDATE branches SET name=$2, address=$3, latitude=$4, longitude=$5, radius_m=$6 WHERE id=$1 RETURNING id', [b.id, ...args])
-    : await q1('INSERT INTO branches (name, address, latitude, longitude, radius_m) VALUES ($1,$2,$3,$4,$5) RETURNING id', args);
-  await audit(req.user, b.id ? 'update' : 'create', 'branch', r.id, null, b);
+    ? await q1('UPDATE branches SET name=$2, address=$3, latitude=$4, longitude=$5, radius_m=$6 WHERE id=$1 RETURNING *', [b.id, ...args])
+    : await q1('INSERT INTO branches (name, address, latitude, longitude, radius_m) VALUES ($1,$2,$3,$4,$5) RETURNING *', args);
+  await audit(req.user, b.id ? 'update' : 'create', 'branch', r.id, old, r);
   res.json(r);
 }));
 api.post('/departments', HR, wrap(async (req, res) => {
@@ -553,6 +568,21 @@ api.get('/reports/monthly.xlsx', REPORT, wrap(async (req, res) => {
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="attendance_${from}_${to}.xlsx"`);
   await wb.xlsx.write(res); res.end();
+}));
+
+// Small numbers shown beside the menu items, so people see at a glance where work is waiting.
+api.get('/counts', wrap(async (req, res) => {
+  if (req.user.role === 'employee' || req.user.role === 'management') return res.json({ exceptions: 0, approvals: 0 });
+  const depts = await visibleDepartments(req.user);
+  const one = async (sql, extra = []) => (await q1(sql, [depts, ...extra])).n;
+  res.json({
+    exceptions: await one(`SELECT count(*)::int AS n FROM attendance a JOIN employees e ON e.id = a.employee_id
+      WHERE a.flag IS NOT NULL AND a.date >= $2 AND ($1::int[] IS NULL OR e.department_id = ANY($1))`, [addDays(today(), -60)]),
+    approvals: await one(`SELECT (SELECT count(*) FROM leave_requests r JOIN employees e ON e.id = r.employee_id
+        WHERE r.status = 'pending' AND r.employee_id <> $2 AND ($1::int[] IS NULL OR e.department_id = ANY($1)))::int
+      + (SELECT count(*) FROM corrections c JOIN employees e ON e.id = c.employee_id
+        WHERE c.status = 'pending' AND c.employee_id <> $2 AND ($1::int[] IS NULL OR e.department_id = ANY($1)))::int AS n`, [req.user.id]),
+  });
 }));
 
 // ---------- Notifications and audit ----------

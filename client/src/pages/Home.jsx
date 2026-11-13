@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, useLoad, usePrefs, Page, Chip, Modal, Field, ErrorNote, Empty, useAction, hours } from '../lib.jsx';
-import { ChangePassword } from '../App.jsx';
+import { api, useLoad, usePrefs, Page, Modal, Field, ErrorNote, useAction, hours, nowMin, minOf } from '../lib.jsx';
 
 function PhoneCheckIn({ onClose, onDone }) {
   const [note, setNote] = useState('');
@@ -15,61 +14,89 @@ function PhoneCheckIn({ onClose, onDone }) {
     onDone();
   });
   return (
-    <Modal title="Check in by phone" onClose={onClose}>
-      <p className="hint">Use this only when the fingerprint device is not working or you are working outside the office. Your first punch of the day is your check-in and your last is your check-out.</p>
-      <Field label="Note (required outside the office)"><input value={note} onChange={e => setNote(e.target.value)} placeholder="Where are you working?" /></Field>
+    <Modal title="Record my time by phone" onClose={onClose}>
+      <p className="hint">Use this only when the fingerprint reader is not working, or you are working outside the office. Your first record of the day is your arrival and your last is your departure.</p>
+      <Field label="Where are you working?"><input value={note} onChange={e => setNote(e.target.value)} placeholder="Needed when you are outside the office" /></Field>
       <ErrorNote>{act.error}</ErrorNote>
-      <div className="row-end"><button className="primary" onClick={send} disabled={act.busy}>Record now</button></div>
+      <div className="row-end"><button className="primary" onClick={send} disabled={act.busy}>Record the time now</button></div>
     </Modal>
   );
 }
 
+// The working day as one line: scheduled hours, the lunch break, and the part already worked.
+function DayLine({ schedule: s, record: a }) {
+  const { clock } = usePrefs();
+  const from = s.start_min - 45, to = s.end_min + 45, span = to - from;
+  const x = m => `${Math.min(100, Math.max(0, (m - from) / span * 100))}%`;
+  const w = (m1, m2) => `${Math.max(0, (Math.min(m2, to) - Math.max(m1, from)) / span * 100)}%`;
+  const inMin = minOf(a?.check_in), outMin = minOf(a?.check_out), now = nowMin();
+  const until = outMin ?? (now > from && now < to ? now : null);
+  return (
+    <div className="dayline">
+      <div className="track" role="img" aria-label="Today's working hours">
+        {s.break_start != null && <div className="band lunch" style={{ left: x(s.break_start), width: w(s.break_start, s.break_end) }} />}
+        {inMin != null && a.late_min > 0 && <div className="band late-gap" style={{ left: x(s.start_min), width: w(s.start_min, inMin) }} />}
+        {inMin != null && until != null && <div className="band worked" style={{ left: x(inMin), width: w(inMin, until) }} />}
+        {outMin == null && now > from && now < to && <div className="nowmark" style={{ left: x(now) }} />}
+      </div>
+      <div className="ticks">
+        <span style={{ left: x(s.start_min) }}><b>{clock(s.start_min)}</b>Start</span>
+        {s.break_start != null && <span style={{ left: x((s.break_start + s.break_end) / 2) }}><b>{clock(s.break_start)}</b>Lunch</span>}
+        <span style={{ left: x(s.end_min) }}><b>{clock(s.end_min)}</b>End</span>
+      </div>
+    </div>
+  );
+}
+
+function headline(a, s, fmtTime) {
+  if (!s && !a?.check_in) return ['Today is a day off for you.', ''];
+  switch (a?.status) {
+    case 'leave': return ['You are on leave today.', ''];
+    case 'holiday': return ['Today is a holiday.', ''];
+    case 'absent': return ['No arrival was recorded today.', 'absent'];
+    case 'late': case 'half_day': return [a.check_out ? `You worked until ${fmtTime(a.check_out)}.` : `You arrived at ${fmtTime(a.check_in)}, ${a.late_min} minutes late.`, a.check_out ? '' : 'late'];
+    case 'present': case 'extra': return [a.check_out ? `You worked until ${fmtTime(a.check_out)}. See you next time.` : `You arrived at ${fmtTime(a.check_in)}.`, ''];
+    default: return ['You have not arrived yet.', ''];
+  }
+}
+
 export default function Home({ user }) {
-  const { t, fmtDate, fmtTime, fmtStamp, clock } = usePrefs();
+  const { t, fmtDate, fmtTime, fmtStamp } = usePrefs();
   const [d, reload, error] = useLoad('/dashboard/me');
   const [bal] = useLoad('/leave/balances');
   const [notes, reloadNotes] = useLoad('/notifications');
-  const [dialog, setDialog] = useState('');
+  const [checkin, setCheckin] = useState(false);
   if (error) return <Page title={t('Home')}><ErrorNote>{error}</ErrorNote></Page>;
   if (!d) return null;
-  const a = d.today, s = d.schedule;
-  const annual = bal?.[0];
+  const [text, tone] = headline(d.today, d.schedule, fmtTime);
+  const m = d.month, annual = bal?.[0];
+  const unread = notes?.filter(n => !n.read_at) || [];
   return (
-    <Page title={`${t('Today')}, ${fmtDate(d.date)}`}
-      hint={s ? `Your hours today: ${clock(s.start_min)} to ${clock(s.end_min)}` : 'Today is not a working day for you.'}
-      actions={<button onClick={() => setDialog('checkin')}>{t('Check in by phone')}</button>}>
-      <div className="today card">
-        <Chip status={a?.status || 'off'} />
-        <dl>
-          <div><dt>{t('Check-in')}</dt><dd>{fmtTime(a?.check_in)}</dd></div>
-          <div><dt>{t('Check-out')}</dt><dd>{fmtTime(a?.check_out)}</dd></div>
-          {a?.late_min > 0 && <div><dt>{t('Late')}</dt><dd>{a.late_min} min</dd></div>}
-        </dl>
+    <section className="page">
+      <p className="hint">{fmtDate(d.date)}</p>
+      <h1 className={'now ' + tone}>{text}</h1>
+      {d.schedule && <DayLine schedule={d.schedule} record={d.today} />}
+
+      <p className="summary">
+        This month you worked <b>{m.worked} {m.worked === 1 ? 'day' : 'days'}</b> ({hours(m.worked_min)} hours)
+        {m.late > 0 && <>, arrived late <b>{m.late} {m.late === 1 ? 'time' : 'times'}</b></>}
+        {m.absent > 0 && <>, and were absent <b>{m.absent} {m.absent === 1 ? 'day' : 'days'}</b></>}.
+        {annual && <> You have <b>{annual.remaining} days</b> of annual leave left.</>}
+      </p>
+      <div className="home-actions">
+        <Link className="button primary" to="/leave">{t('Request leave')}</Link>
+        <Link className="button" to="/attendance">{t('My attendance')}</Link>
+        <button className="quiet" onClick={() => setCheckin(true)}>Fingerprint reader not working?</button>
       </div>
 
-      <h2>{t('This month')}</h2>
-      <div className="stats">
-        <div><strong>{d.month.worked}</strong><span>{t('Days worked')}</span></div>
-        <div><strong>{d.month.late}</strong><span>{t('Late')}</span></div>
-        <div><strong>{d.month.absent}</strong><span>{t('Absent')}</span></div>
-        <div><strong>{hours(d.month.worked_min)}</strong><span>{t('Hours worked')}</span></div>
-        {annual && <div><strong>{annual.remaining}</strong><span>{annual.name} {t('Leave balance').toLowerCase()}</span></div>}
-      </div>
-      <p className="links"><Link to="/attendance">{t('My attendance')} →</Link><Link to="/leave">{t('Request leave')} →</Link>
-        <button className="link" onClick={() => setDialog('password')}>{t('Change password')}</button></p>
-
-      <h2>{t('Notifications')}</h2>
-      {notes?.length ? (
-        <>
-          <ul className="notes">
-            {notes.slice(0, 8).map(n => <li key={n.id} className={n.read_at ? '' : 'unread'}><strong>{n.title}</strong><span>{n.body}</span><time>{fmtStamp(n.created_at)}</time></li>)}
-          </ul>
-          {d.unread > 0 && <button className="link" onClick={async () => { await api('/notifications/read', { method: 'POST' }); reloadNotes(); reload(); }}>Mark all as read</button>}
-        </>
-      ) : <Empty>Nothing new.</Empty>}
-
-      {dialog === 'checkin' && <PhoneCheckIn onClose={() => setDialog('')} onDone={() => { setDialog(''); reload(); }} />}
-      {dialog === 'password' && <Modal title={t('Change password')} onClose={() => setDialog('')}><ChangePassword onDone={() => setDialog('')} /></Modal>}
-    </Page>
+      {unread.length > 0 && <>
+        <h2 className="section">New for you</h2>
+        <ul className="list">
+          {unread.slice(0, 5).map(n => <li key={n.id}><div className="grow"><strong>{n.title}</strong><small>{n.body}</small></div></li>)}
+        </ul>
+        <div className="row-end"><button className="quiet" onClick={async () => { await api('/notifications/read', { method: 'POST' }); reloadNotes(); }}>Mark as read</button></div>
+      </>}
+      {checkin && <PhoneCheckIn onClose={() => setCheckin(false)} onDone={() => { setCheckin(false); reload(); }} />}
+    </section>
   );
 }
